@@ -1,0 +1,109 @@
+Backup first:
+cp /ragflow/rag/llm/chat_model.py /ragflow/rag/llm/chat_model.py.bak
+
+Run with python:
+python - <<'PY'
+from pathlib import Path
+
+p = Path("/ragflow/rag/llm/chat_model.py")
+s = p.read_text(encoding="utf-8")
+
+if "import logging" not in s:
+    s = s.replace("import re\n", "import re\nimport logging\n", 1)
+
+helper = '''
+    def _debug_log_llm_response(self, stage, response):
+        if not logging.getLogger().isEnabledFor(logging.DEBUG):
+            return
+        try:
+            if hasattr(response, "model_dump_json"):
+                payload = response.model_dump_json(exclude_none=True)
+            elif hasattr(response, "model_dump"):
+                payload = json.dumps(response.model_dump(exclude_none=True), ensure_ascii=False)
+            else:
+                payload = json.dumps(response, ensure_ascii=False, default=str)
+        except Exception:
+            payload = str(response)
+
+        max_len = int(os.environ.get("LLM_DEBUG_RESPONSE_MAX_LEN", 20000))
+        if len(payload) > max_len:
+            payload = payload[:max_len] + "...(truncated)"
+        logging.debug("LLM response [%s]: %s", stage, payload)
+
+'''
+
+if "_debug_log_llm_response" not in s:
+    s = s.replace(
+        '        self.model_name = model_name\n',
+        '        self.model_name = model_name\n' + helper + '\n',
+        1
+    )
+
+chat_target = '            ans = response.choices[0].message.content.strip()\n'
+chat_insert = '            self._debug_log_llm_response("chat", response)\n' + chat_target
+if 'self._debug_log_llm_response("chat", response)' not in s:
+    s = s.replace(chat_target, chat_insert, 1)
+
+stream_target = '            for resp in response:\n'
+stream_insert = stream_target + '                self._debug_log_llm_response("chat_streamly.chunk", resp)\n'
+if 'self._debug_log_llm_response("chat_streamly.chunk", resp)' not in s:
+    s = s.replace(stream_target, stream_insert, 1)
+
+p.write_text(s, encoding="utf-8")
+print("patched:", p)
+PY
+
+If the container only has python3:
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("/ragflow/rag/llm/chat_model.py")
+s = p.read_text(encoding="utf-8")
+
+if "import logging" not in s:
+    s = s.replace("import re\n", "import re\nimport logging\n", 1)
+
+helper = '''
+    def _debug_log_llm_response(self, stage, response):
+        if not logging.getLogger().isEnabledFor(logging.DEBUG):
+            return
+        try:
+            if hasattr(response, "model_dump_json"):
+                payload = response.model_dump_json(exclude_none=True)
+            elif hasattr(response, "model_dump"):
+                payload = json.dumps(response.model_dump(exclude_none=True), ensure_ascii=False)
+            else:
+                payload = json.dumps(response, ensure_ascii=False, default=str)
+        except Exception:
+            payload = str(response)
+
+        max_len = int(os.environ.get("LLM_DEBUG_RESPONSE_MAX_LEN", 20000))
+        if len(payload) > max_len:
+            payload = payload[:max_len] + "...(truncated)"
+        logging.debug("LLM response [%s]: %s", stage, payload)
+
+'''
+
+if "_debug_log_llm_response" not in s:
+    s = s.replace(
+        '        self.model_name = model_name\n',
+        '        self.model_name = model_name\n' + helper + '\n',
+        1
+    )
+
+chat_target = '            ans = response.choices[0].message.content.strip()\n'
+chat_insert = '            self._debug_log_llm_response("chat", response)\n' + chat_target
+if 'self._debug_log_llm_response("chat", response)' not in s:
+    s = s.replace(chat_target, chat_insert, 1)
+
+stream_target = '            for resp in response:\n'
+stream_insert = stream_target + '                self._debug_log_llm_response("chat_streamly.chunk", resp)\n'
+if 'self._debug_log_llm_response("chat_streamly.chunk", resp)' not in s:
+    s = s.replace(stream_target, stream_insert, 1)
+
+p.write_text(s, encoding="utf-8")
+print("patched:", p)
+PY
+
+Verify:
+grep -n "import logging\\|_debug_log_llm_response\\|LLM response \\[" /ragflow/rag/llm/chat_model.py
