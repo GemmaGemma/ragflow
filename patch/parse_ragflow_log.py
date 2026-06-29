@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\b")
@@ -22,6 +22,9 @@ def extract_api_response_id(text: str) -> Optional[str]:
         if match:
             return match.group(1)
     return None
+
+
+DATE_SUFFIX_RE = re.compile(r"^(?P<stem>.+?)(?P<suffix>-\d{2}-\d{2})?\.log$", re.IGNORECASE)
 
 
 def read_events(log_path: Path) -> List[str]:
@@ -269,24 +272,76 @@ def write_json(traces: Dict[str, RequestTrace], output_path: Path) -> None:
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def resolve_log_files(log_path: Optional[str], log_dir: Optional[str]) -> List[Path]:
+    files: List[Path] = []
+    if log_path:
+        files.append(Path(log_path))
+    if log_dir:
+        files.extend(sorted(Path(log_dir).glob("ragflow_server*.log")))
+
+    unique_files: List[Path] = []
+    seen = set()
+    for file in files:
+        resolved = file.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_files.append(file)
+    return unique_files
+
+
+def build_output_paths(log_file: Path, out_json: Optional[str], out_md: Optional[str]) -> Tuple[Path, Path]:
+    if out_json or out_md:
+        json_path = Path(out_json) if out_json else Path(out_md).with_suffix(".json")
+        md_path = Path(out_md) if out_md else Path(out_json).with_suffix(".md")
+        return json_path, md_path
+
+    match = DATE_SUFFIX_RE.match(log_file.name)
+    suffix = match.group("suffix") if match else ""
+    suffix = suffix or ""
+    return (
+        log_file.with_name(f"ragflow_generate_llm_pairs{suffix}.json"),
+        log_file.with_name(f"ragflow_generate_llm_pairs{suffix}.md"),
+    )
+
+
+def export_one_log(log_file: Path, out_json: Optional[str], out_md: Optional[str], api_id: Optional[str]) -> Tuple[Path, Path, int]:
+    traces = parse_log(log_file)
+    traces = {k: v for k, v in traces.items() if v.llm_responses}
+    if api_id:
+        traces = {k: v for k, v in traces.items() if k == api_id}
+
+    json_path, md_path = build_output_paths(log_file, out_json, out_md)
+    write_markdown(traces, md_path)
+    write_json(traces, json_path)
+    return json_path, md_path, len(traces)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Group RAGFlow logs by apiResponseId and pair Generate input with LLM output.")
-    parser.add_argument("--log", default="ragflow_server.log", help="Path to the ragflow log file")
-    parser.add_argument("--out-md", default="ragflow_generate_llm_pairs.md", help="Output markdown path")
-    parser.add_argument("--out-json", default="ragflow_generate_llm_pairs.json", help="Output json path")
+    parser.add_argument("--log", default=None, help="Path to one ragflow log file")
+    parser.add_argument("--log-dir", default=None, help="Directory containing ragflow_server*.log files")
+    parser.add_argument("--out-md", default=None, help="Output markdown path; only valid when processing one log")
+    parser.add_argument("--out-json", default=None, help="Output json path; only valid when processing one log")
     parser.add_argument("--api-id", default=None, help="Only export one apiResponseId")
     args = parser.parse_args()
 
-    traces = parse_log(Path(args.log))
-    traces = {k: v for k, v in traces.items() if v.llm_responses}
-    if args.api_id:
-        traces = {k: v for k, v in traces.items() if k == args.api_id}
+    if not args.log and not args.log_dir:
+        args.log = "ragflow_server.log"
 
-    write_markdown(traces, Path(args.out_md))
-    write_json(traces, Path(args.out_json))
-    print("grouped requests:", len(traces))
-    print("markdown:", Path(args.out_md).resolve())
-    print("json:", Path(args.out_json).resolve())
+    log_files = resolve_log_files(args.log, args.log_dir)
+    if not log_files:
+        raise SystemExit("No log files found.")
+
+    if len(log_files) > 1 and (args.out_json or args.out_md):
+        raise SystemExit("--out-json/--out-md can only be used when processing one log.")
+
+    for log_file in log_files:
+        json_path, md_path, count = export_one_log(log_file, args.out_json, args.out_md, args.api_id)
+        print(f"log: {log_file.resolve()}")
+        print("grouped requests:", count)
+        print("markdown:", md_path.resolve())
+        print("json:", json_path.resolve())
+        print()
 
 
 if __name__ == "__main__":
